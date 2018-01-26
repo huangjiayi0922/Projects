@@ -1,0 +1,449 @@
+---
+title: "Stat 153 Final Project"
+author: "Jiayi Huang"
+date: "12/7/2017"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+# Section 0: Prepration
+```{r}
+## Step 0: Loading packages and libraries
+library(xlsx)
+library(tseries)
+library(forecast)
+library(readxl)
+library(TSA)
+library(lubridate)
+library(lmtest)
+## Step 1: Loading raw data
+raw_data = read_xlsx("~/Desktop/Stat 153/Unemployment Insurance Weekly California.xlsx")
+## Step 2: Data Cleaning
+clean = raw_data
+time_stamps = as.numeric(as.Date(clean$'Reflecting Week Ended'))
+clean['Time Stamp'] = (time_stamps - min(time_stamps))/7
+#### Since the total claim is calculated by the sum of initial claim and contined claim within a week if the applicant is eligible to receieve unemployment insurance for that week, it makes sense to combine both 'Initial Claims' and 'Total Claim'.  
+clean1 = subset(clean, select = c(8,4,3,5,6,7))
+clean2 = subset(clean, select = c(8,3,5,6,7))
+clean2[diff(clean2$'Time Stamp') != 1,]
+#### We noticed that there are two set of week(s) with missing data.
+#### Manually fill in data for those two sets of week(s) with missing data. Assume uniform change between two time points.
+weeks = subset(clean, select = c(4))
+#### First set of week: Time Stamp = 11
+weeks[nrow(clean2) + 1,] = '1987-03-14'
+clean2[nrow(clean2) + 1,] = 0.5*(clean2[clean2$`Time Stamp` == 10,] + clean2[clean2$`Time Stamp` == 12,])
+#### Second set of week(s): Time Stamps = 26, 27, 28, 29
+weeks[nrow(weeks) + 1,] = '1987-06-27'
+weeks[nrow(weeks) + 1,] = '1987-07-04'
+weeks[nrow(weeks) + 1,] = '1987-07-11'
+weeks[nrow(weeks) + 1,] = '1987-07-18'
+time_diff = (1/5) * (clean2[clean2$`Time Stamp` == 30,] - clean2[clean2$`Time Stamp` == 25,])
+base_row = clean2[clean2$`Time Stamp` == 25,]
+clean2[nrow(clean2) + 1,] = base_row + time_diff # t = 26
+clean2[nrow(clean2) + 1,] = base_row + 2*time_diff # t = 27
+clean2[nrow(clean2) + 1,] = base_row + 3*time_diff # t = 28
+clean2[nrow(clean2) + 1,] = base_row + 4*time_diff # t = 29
+clean_data = clean2[order(clean2$`Time Stamp`),]
+clean_data['Reflecting Week Ended'] = weeks[order(weeks$`Reflecting Week Ended`),]
+clean_data[diff(clean_data$'Time Stamp') != 1,] # No missing Data anymore.
+#### Exporting the clean data for later usage
+# write.xlsx(clean_data, file = "(Clean)Unemployment Insurance Weekly California.xlsx")
+## Step 3: Loading clean data
+clean_data = read_xlsx("~/Desktop/Stat 153/(Clean)Unemployment Insurance Weekly California.xlsx")
+## Step 4: Converting weeklytotal insurance claims to time series data
+ts_total = ts(clean_data$`Initial Claims`+ clean_data$`Continued Claims`, start = decimal_date(ymd("1986-12-27")), frequency = 365.25/7)
+#### I will proceed with total claims since it takes into account of both the stock (old) and influx (new) insurance claims. I am more interested in knowing how much the total weekly claims are.
+```
+
+# Section 1: Initial Exploratory Data Analysis
+```{r}
+summary(ts_total) # Range and quartiles
+length(ts_total) # Total number of time points observed is 1606
+```
+
+# Section 2: Check for Stationarity 
+```{r}
+## Step 1: Plot
+plot(ts_total, type = 'l', main = 'Weekly CA Total Unemployment Insurance Claims', ylim = c(2e5, 11e5), ylab = 'Weekly Total UI Claims (count)', sub = "Total Claim = Initial Claim + Continued Claim")
+abline(reg=lm(ts_total~time(ts_total)), col = 'red',lty=2) 
+legend("topleft", legend=c("Total Claims (ts)", "Non-Seasonal Linear Trend"),col=c("black", "red"), lty=1:2, cex=.7, box.lty=0)
+#### Looking at this we can see that we have 2 issues. Both the mean and variance are changing over time. Clearly non-stationary.
+## Step 2: Dicky Fuller Tests for Stationarity
+adf_p_stat = c(adf.test(ts_total, alternative="stationary",k=365.25/7)[4][[1]], adf.test(log(ts_total), alternative="stationary",k=365.25/7)[4][[1]], adf.test(diff(ts_total), alternative="stationary",k=365.25/7)[4][[1]], adf.test(diff(log(ts_total)), alternative="stationary",k=365.25/7)[4][[1]]) 
+adf_stat_s = c(adf.test(ts_total, alternative="stationary",k=365.25/7)[1][[1]], adf.test(log(ts_total), alternative="stationary",k=365.25/7)[1][[1]], adf.test(diff(ts_total), alternative="stationary",k=365.25/7)[1][[1]], adf.test(diff(log(ts_total)), alternative="stationary",k=365.25/7)[1][[1]])
+adf_stat_ex = c(adf.test(ts_total, alternative="explosive",k=365.25/7)[1][[1]], adf.test(log(ts_total), alternative="explosive",k=365.25/7)[1][[1]], adf.test(diff(ts_total), alternative="explosive",k=365.25/7)[1][[1]], adf.test(diff(log(ts_total)), alternative="explosive",k=365.25/7)[1][[1]])
+adf_p_ex = c(adf.test(ts_total, alternative="explosive",k=365.25/7)[4][[1]], adf.test(log(ts_total), alternative="explosive",k=365.25/7)[4][[1]], adf.test(diff(ts_total), alternative="explosive",k=365.25/7)[4][[1]], adf.test(diff(log(ts_total)), alternative="explosive",k=365.25/7)[4][[1]])
+method_list = c('ts','log(ts)','diff(ts)', 'diff(log(ts))')
+detrend_df = data.frame('Detrend Method' = method_list,
+'DF(Ho:Non-Stationary)'= adf_stat_s, 'P-value(Ho:Non-Stationary)'=adf_p_stat,
+'DF(Ho:Explosive)'=adf_stat_ex, 'P-value(Ho:Non-Explosive)'=adf_p_ex)
+detrend_df
+### Original: Non-Stationary
+adf.test(ts_total, alternative="stationary",k=365.25/7) #### Not stationary
+adf.test(ts_total, alternative="explosive",k=365.25/7) #### Not explosive
+### Log-Scale: Non-Stationary
+plot(log(ts_total), type = 'o', main = 'Log(Total Weekly Claims)')
+abline(reg=lm(log(ts_total)~time(ts_total)), col = 'red') #### Still doesn't look stationary
+adf.test(log(ts_total), alternative="stationary",k=365.25/7) #### Not stationary
+adf.test(log(ts_total), alternative="explosive",k=365.25/7) #### Not explosive
+### First Differencing: Stationary
+plot(diff(ts_total), type = 'o', main='Time Series Plot of the First Differences of Weekly Total Claims', ylab='First Difference of Weekly Total Claims', xlab='Time')
+abline(reg=lm(diff(ts_total)~time(diff(ts_total))), col = 'red') #### Looks stationary
+adf.test(diff(ts_total), alternative="stationary",k=365.25/7) #### stationary!
+adf.test(diff(ts_total), alternative="explosive",k=365.25/7) #### Not explosive
+### First Differencing of Log-Scale: Stationary, best choice!
+plot(diff(log(ts_total)), type = 'o', main='Time Series Plot of the First Differences of log(Weekly Total Claims)', ylab='First Difference of log(Weekly Total Claims)', xlab='Time')
+abline(reg=lm(diff(log(ts_total))~time(diff(log(ts_total)))), col = 'red') #### Looks stationary
+adf.test(diff(log(ts_total)), alternative="stationary",k=365.25/7) #### stationary!
+adf.test(diff(log(ts_total)), alternative="explosive",k=365.25/7) #### Not explosive
+### Plotting
+par(mfrow=c(3,1))
+plot(log(ts_total), type = 'l', main = 'Log-Scale of Weekly Total Claims', ylab='log(ts)', xlab='Time')
+abline(reg=lm(log(ts_total)~time(ts_total)), col = 'red') #### Still doesn't look stationary
+plot(diff(ts_total), type = 'l', main='First Differences of Weekly Total Claims',ylab='diff(ts)', xlab='Time')
+abline(reg=lm(diff(ts_total)~time(diff(ts_total))), col = 'red')
+plot(diff(log(ts_total)), type = 'l', main='First Differences of Log-Scale of Total Weekly Claims', ylab='diff(log(ts))', xlab='Time')
+abline(reg=lm(diff(log(ts_total))~time(diff(log(ts_total)))), col = 'red') #### Looks stationary
+```
+
+# Section 3: Choosing Training Set and Test Set
+```{r}
+#### Since I am predicting weekly total claims 1 year in advance starting on 10/07/2017, I will save the last 1 year (52 weeks) (10/08/2016 - 09/30/2017) as my test set, the rest will be my training set.
+training_set = window(ts_total, end = decimal_date(ymd("2016-10-08")), frequency = 365.25/7) 
+length(training_set) #### 1554
+test_set = window(ts_total, start = decimal_date(ymd("2016-10-08")), frequency = 365.25/7)
+length(test_set) #### 52
+#### (Revisited) After testsing a few ARIMA models with the orginal training set which contains all data points from 1986 - 2016. The forecasts seem somewhat inaccurate. After speaking to Andre, I decided to forego all the data prior to 2012 since I believe the economic activties (e.g. 2008 recession) had unusual influences on my prediction and they are not as relevant for me to predict the claims in 2017 and on. I included one ARIMA model using the full training set in the next section to show that models built using the full training set generally have much higher AIC than models built using the recent training set.
+training_set_recent = window(ts_total, start = decimal_date(ymd("2012-09-29")), end = decimal_date(ymd("2016-10-08")), frequency = 365.25/7)
+length(training_set_recent) #### 210
+```
+
+# Section 4: Examining Seasonality
+```{r}
+## Step 1: Boxplot
+boxplot(training_set_recent ~ cycle(training_set_recent), main = 'Boxplot of Training Set', xlab = 'Week') #### Shows potential seasonality since all the weeks seem to have different means.
+par(mfrow=c(2,2))
+## Step 2: ACF 
+acf(as.vector(training_set_recent),lag.max=365.25/7*3, main = 'ACF(Training Set)') #### There look to be some very clear seasonal relationships, let's try the first difference.
+acf(as.vector(diff(training_set_recent)),lag.max = 365.25/7*3, main = 'ACF diff(Training Set)') 
+plot(diff(training_set), main='First Differences of Training Set', ylab='diff(Weekly Claims)', xlab='Time')
+#### Now that have differenced, we still have issues so lets try another difference, but this one a seasonal difference using the weekly lag n * 365.25/7.
+plot(diff(diff(training_set_recent),lag=52),main="First and Seasonal Differences of Weekly Claims",xlab='Time', ylab='First and Seasonal Difference of Weekly Claims')
+abline(h=0, col = 'red') 
+#### Now it looks like most, if not all of the seasonality is gone. This results supports that the first seasonal weekly difference detrends the data.
+```
+
+# Section 5: Seasonal ARIMA Models
+```{r}
+## ARIMA Model 0: Using auto.arima (with the full training set)
+#### Using auto.arima when the original undifferenced time series (full training set), and use it directly to build the forecast model. I included this model built using the full training set to show that models built using the full training set generally have much higher AIC than models built using the recent training set. Every model after this will be using the recent training set starting in 2012 instead of 1989.
+### Step 1: Building the Seasonal ARIMA Model
+arima_train_auto = auto.arima(training_set) 
+arima_train_auto #### ARIMA(2,1,0)(1,0,0)[52], which agrees with my seasonality assumption. AIC=36150.81. This AIC is very large to compare to the AIC's built using the recent training set.
+par(mfrow=c(2,1))
+### Step 2: 1 Year Forecast Plots
+forecast_arima_train_auto = forecast(arima_train_auto, h=365.25/7) #### Model 0
+plot(forecast_arima_train_auto, sub ='Training Forecast (ARIMA Model 0)', ylab = 'Weekly Total Claims (forecast)')
+plot(forecast_arima_train_auto[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims($)", main = "Model 0: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+### Step 3: Calculate the Root Mean Squared Residuals
+arima_auto_rmse = sqrt(mean((forecast_arima_train_auto[4][[1]] - test_set)^2))
+arima_auto_rmse #### 28683.89, this is very large compare to the rmse's built using the recent training set.
+#### Note: ONLY this model (ARIMA Model 0) uses the full training set, every other model will be using the recent training set instead.
+## ARIMA Model 1: Using auto.arima (with the recent training set)
+### Step 1: Building the Seasonal ARIMA Model 
+arima_train_auto_recent = auto.arima(training_set_recent) #### Model 1
+arima_train_auto_recent #### ARIMA(1,1,2)(1,0,0)[52], which agrees with my seasonality assumption. AIC=4971.27, which is a lot smaller than using the full training set.
+forecast_arima_train_auto_recent = forecast(arima_train_auto_recent, h=365.25/7)
+### Step 2: 1 Year Forecast Plots
+plot(forecast_arima_train_auto_recent, sub ='Recent Training Forecast (ARIMA Model 1)', ylab = 'Weekly Total Claims (forecast)')
+plot(forecast_arima_train_auto_recent[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims($)", main = "Model 1: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+### Step 3: Calculate the Root Mean Squared Residuals
+arima_auto_recent_rmse = sqrt(mean((forecast_arima_train_auto_recent[4][[1]] - test_set)^2))
+arima_auto_recent_rmse #### 27494.18, which is also smaller than using the full training set(28683.89).
+## ARIMA Model 2: Picking coefficients manually. 
+par(mfrow=c(2,2))
+### Step 1: Picking (p, d, q)
+acf(as.vector(diff(training_set)), main = 'ACF diff(training_set)')
+pacf(as.vector(diff(training_set)), main = 'PACF diff(training_set)')
+eacf(as.vector(diff(training_set))) #### According to the first differencing eacf plot, the first circle of the vertices of the diagonal triangle appears at p = 1 and q = 2.
+#### (1,1,2) for all
+### Step 2: Picking (P, D, Q)S 
+#### In Section 1, the first different gives us a stationary plot, D = 1 or D = 0. In Section 4, we saw weekly seasonality, S = 52
+acf(as.vector(diff(diff(training_set_recent),lag=52)),lag.max=365.25/7*3,ci.type='ma', main = 'ACF 1st diff and seasonal diff(training_set)')#### According to the second differencing acf plot, every lag 1 after lag is insignificant. Q = 1
+pacf(as.vector(diff(diff(training_set_recent),lag=52)),lag.max=365.25/7*3,main = 'PACF 1st diff and seasonal diff(training_set)') #### According to the second differencing pacf plot, every lag after lag 3 is insignificant. P = 3.
+eacf(as.vector(diff(diff(training_set),lag=52))) #### According to the second differencing eacf plot, the first circle of the vertices of the diagonal triangle appears at at P = 1 and Q = 2.
+### Step 3: Training the ARIMA models 
+par(mfrow=c(2,1))
+#### Model 2.1: (1,1,2)(1,0,1)[52]
+arima_model2.1 = Arima(training_set_recent,order=c(1,1,2),seasonal=list(order=c(1,0,1),period=365.25/7))
+arima_model2.1 
+coeftest(arima_model2.1) ####Coefficients are significant
+forecast_arima_model2.1 = forecast(arima_model2.1, h = 365.25/7)
+plot(forecast_arima_model2.1, sub ='Recent Training Forecast (ARIMA Model 2.1)', ylab = 'Weekly Total Claims (forecast)')
+plot(forecast_arima_model2.1[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "Model 2.1: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+#### Calculate the Root Mean Squared Residuals
+arima_model2.1_rmse = sqrt(mean((forecast_arima_model2.1[4][[1]] - test_set)^2))
+arima_model2.1_rmse 
+
+#### Model 2.2: (1,1,2)(2,0,1)[52]
+arima_model2.2 = Arima(training_set_recent,order=c(1,1,2),seasonal=list(order=c(2,0,1),period=365.25/7))
+arima_model2.2
+coeftest(arima_model2.2) ####Some coefficients are significant
+forecast_arima_model2.2 = forecast(arima_model2.2, h = 365.25/7)
+plot(forecast_arima_model2.2, sub ='Recent Training Forecast (ARIMA Model 2.2)', ylab = 'Weekly Total Claims (forecast)')
+plot(forecast_arima_model2.2[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "Model 2.2: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+#### Calculate the Root Mean Squared Residuals
+arima_model2.2_rmse = sqrt(mean((forecast_arima_model2.2[4][[1]] - test_set)^2))
+arima_model2.2_rmse 
+
+#### Model 2.3: (1,1,2)(1,1,1)[52]
+arima_model2.3 = Arima(training_set_recent,order=c(1,1,2),seasonal=list(order=c(1,1,1),period=365.25/7))
+arima_model2.3 
+coeftest(arima_model2.3) ####None of the coefficients are significant
+forecast_arima_model2.3 = forecast(arima_model2.3, h = 365.25/7)
+plot(forecast_arima_model2.3, sub ='Recent Training Forecast (ARIMA Model 2.3)', ylab = 'Weekly Total Claims (forecast)')
+plot(forecast_arima_model2.3[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "Model 2.3: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+#### Calculate the Root Mean Squared Residuals
+arima_model2.3_rmse = sqrt(mean((forecast_arima_model2.3[4][[1]] - test_set)^2))
+arima_model2.3_rmse 
+
+#### Model 2.4: (1,1,2)(1,1,2)[52] 
+arima_model2.4 = Arima(training_set_recent,order=c(1,1,2),seasonal=list(order=c(1,1,2),period=365.25/7))
+arima_model2.4 
+coeftest(arima_model2.4) ####None of the coefficients are significant
+forecast_arima_model2.4 = forecast(arima_model2.4, h = 365.25/7)
+plot(forecast_arima_model2.4, sub ='Recent Training Forecast (ARIMA Model 2.4)', ylab = 'Weekly Total Claims (forecast)')
+plot(forecast_arima_model2.4[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "Model 2.4: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+#### Calculate the Root Mean Squared Residuals
+arima_model2.4_rmse = sqrt(mean((forecast_arima_model2.4[4][[1]] - test_set)^2))
+arima_model2.4_rmse 
+
+#### Model 2.5: (1,1,2)(1,1,0)[52] The Best model
+arima_model2.5 = Arima(training_set_recent,order=c(1,1,2),seasonal=list(order=c(1,1,0),period=365.25/7))
+arima_model2.5
+coeftest(arima_model2.5) ####One of the coefficients is significant
+par(mfrow=c(2,1))
+forecast_arima_model2.5 = forecast(arima_model2.5, h = 365.25/7)
+plot(forecast_arima_model2.5, ylab = 'Weekly Total Claims', main = 'Training Forecast from ARIMA(1,1,2)(1,1,0)[52]')
+plot(forecast_arima_model2.5[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "(ARIMA(1,1,2)(1,1,0)[52]): Predicted(Red)vs.Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+#### Calculate the Root Mean Squared Residuals
+arima_model2.5_rmse = sqrt(mean((forecast_arima_model2.5[4][[1]] - test_set)^2))
+arima_model2.5_rmse 
+
+#### Model 2.6: (1,1,2)(2,1,0)[52] 
+arima_model2.6 = Arima(training_set_recent,order=c(1,1,2),seasonal=list(order=c(2,1,0),period=365.25/7))
+arima_model2.6 
+coeftest(arima_model2.6) #### Some of the coefficients are significant
+forecast_arima_model2.6 = forecast(arima_model2.6, h = 365.25/7)
+plot(forecast_arima_model2.6, sub ='Recent Training Forecast (ARIMA Model 2.6)', ylab = 'Weekly Total Claims (forecast)')
+plot(forecast_arima_model2.6[4][[1]], col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "Model 2.6: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+#### Calculate the Root Mean Squared Residuals
+arima_model2.6_rmse = sqrt(mean((forecast_arima_model2.6[4][[1]] - test_set)^2))
+arima_model2.6_rmse 
+
+### Step 4: Collecting all ARIMA models to compare all at once.
+arima_model_index = c(0,1,2.1,2.2,2.3,2.4,2.5,2.6)
+arima_model_parameters = c('(1,1,0)(1,0,0)[52]','(1,1,2)(1,0,0)[52]','(1,1,2)(1,0,1)[52]','(1,1,2)(2,0,1)[52]','(1,1,2)(1,1,1)[52]','(1,1,2)(1,1,2)[52]','(1,1,2)(1,1,0)[52]','(1,1,2)(2,1,0)[52]')
+arima_aic = c(arima_train_auto$aic,arima_train_auto_recent$aic,arima_model2.1$aic,arima_model2.2$aic,arima_model2.3$aic,arima_model2.4$aic,arima_model2.5$aic,arima_model2.6$aic)
+arima_rmse = c(arima_auto_rmse,arima_auto_recent_rmse,arima_model2.1_rmse,arima_model2.2_rmse,arima_model2.3_rmse,arima_model2.4_rmse,arima_model2.5_rmse,arima_model2.6_rmse) 
+min_aic = (arima_aic == min(arima_aic))
+min_rmse = (arima_rmse  == min(arima_rmse ))
+arima_models = data.frame(arima_model_index, arima_model_parameters,arima_aic, arima_rmse, min_aic, min_rmse) #### The best seasonal ARMIA model is ARIMA(1,1,2)(1,1,0)[52], or arima_model2.5.
+arima_models
+auto.arima(diff(log(training_set_recent)), trace= TRUE,test = 'kpss',ic = 'bic') #### Which supports my best model being ARIMA(1,1,2)(1,1,0)[52] when feeding in the differenced log training set.
+### Step 5: Best ARIMA Model - Plot of actual data points starting in 2012.
+par(mfrow=c(1,1))
+plot(forecast_arima_model2.5[4][[1]], col='red',xlim =c(min(time(training_set_recent)), 2018), ylim = c(min(training_set_recent)-1000, max(training_set_recent)+1000), ylab = "Weekly Total UI Claims", main = "Overview: Predicted (Red) vs. Actual (Green) Weekly Total Claims", sub = "ARIMA(1,1,2)(1,1,0)[52]")
+lines(window(ts_total, start = decimal_date(ymd("2012-09-29")), frequency = 365.25/7),type="l",col="green")
+```
+
+# Section 6: ARCH-GARCH Models
+```{r}
+require(rugarch)
+par(mfrow=c(1,1))
+McLeod.Li.test(y = training_set_recent, col = "red", omit.initial = TRUE, plot = TRUE)
+# The test checks for the presence of conditional heteroscedascity (ARCH). This result shows that every lag is statistically significant starting at lag 1. This formally shows strong evidence for ARCH in this data.  
+#### GARCH is a better fit for modeling my time series data because the data exhibits heteroskedacisticity but also volatility clustering.
+## Step 1: Building ARMA Models with GARCH 
+par(mfrow=c(2,1))
+### ARMA-GARCH Model 1: ARMA(0,0) Model with GARCH(1,1) 
+armagarch_model_spec1 = ugarchspec(variance.model = list(model="sGARCH",garchOrder=c(1,1)), mean.model = list(armaOrder=c(0,0)),distribution.model = "std")
+armagarch_model1 = ugarchfit(data=training_set_recent, spec=armagarch_model_spec1)
+(-2*likelihood(armagarch_model1))/length(training_set_recent)+2*(length(armagarch_model1@fit$coef))/length(training_set_recent) #### AIC
+armagarch_predict1 = ugarchboot(armagarch_model1,n.ahead=52, method=c("Partial","Full")[1])
+plot(armagarch_predict1,which=2) 
+plot(ts(armagarch_predict1@forc@forecast$seriesFor, start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "GARCH 1: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+garch1_rmse = sqrt(mean((armagarch_predict1@forc@forecast$seriesFor - test_set)^2))
+garch1_rmse
+### ARMA-GARCH Model 2: ARMA(0,0) Model with GARCH(2,2), not the best model
+armagarch_model_spec2 = ugarchspec(variance.model = list(model="sGARCH",garchOrder=c(2,2)), mean.model = list(armaOrder=c(0,0)),distribution.model = "std")
+armagarch_model2 = ugarchfit(data=training_set_recent, spec=armagarch_model_spec2)
+(-2*likelihood(armagarch_model2))/length(training_set_recent)+2*(length(armagarch_model2@fit$coef))/length(training_set_recent) #### AIC
+armagarch_predict2 = ugarchboot(armagarch_model2,n.ahead=52, method=c("Partial","Full")[1])
+plot(armagarch_predict2,which=2) 
+plot(ts(armagarch_predict2@forc@forecast$seriesFor, start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "GARCH 2: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+garch2_rmse = sqrt(mean((armagarch_predict2@forc@forecast$seriesFor - test_set)^2))
+garch2_rmse
+### ARMA-GARCH Model 3: ARMA(1,1) Model with GARCH(1,1), not the best model
+armagarch_model_spec3 = ugarchspec(variance.model = list(model="sGARCH",garchOrder=c(1,1)), mean.model = list(armaOrder=c(1,1)),distribution.model = "std")
+armagarch_model3 = ugarchfit(data=training_set_recent, spec=armagarch_model_spec3)
+(-2*likelihood(armagarch_model3))/length(training_set_recent)+2*(length(armagarch_model3@fit$coef))/length(training_set_recent) #### AIC
+armagarch_predict3 = ugarchboot(armagarch_model3,n.ahead=52, method=c("Partial","Full")[1])
+plot(armagarch_predict3,which=2) 
+plot(ts(armagarch_predict3@forc@forecast$seriesFor, start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "GARCH 3: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+garch3_rmse = sqrt(mean((armagarch_predict3@forc@forecast$seriesFor - test_set)^2))
+garch3_rmse
+### ARMA-GARCH Model 4: ARMA(2,2) Model with GARCH(1,1), best model for GARCH
+armagarch_model_spec4 = ugarchspec(variance.model = list(model="sGARCH",garchOrder=c(1,1)), mean.model = list(armaOrder=c(1,2), include.mean = TRUE),distribution.model = "std")
+armagarch_model4 = ugarchfit(data=training_set_recent, spec=armagarch_model_spec4)
+(-2*likelihood(armagarch_model4))/length(training_set_recent)+2*(length(armagarch_model4@fit$coef))/length(training_set_recent) #### AIC 
+armagarch_predict4 = ugarchboot(armagarch_model4,n.ahead=52, method=c("Partial","Full")[1])
+plot(armagarch_predict4,which=2) 
+plot(ts(armagarch_predict4@forc@forecast$seriesFor, start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "GARCH 4: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+garch4_rmse = sqrt(mean((armagarch_predict4@forc@forecast$seriesFor - test_set)^2))
+garch4_rmse 
+### ARMA-GARCH Model 5: ARMA(3,3) Model with GARCH(1,1), not the best model
+armagarch_model_spec5 = ugarchspec(variance.model = list(model="sGARCH",garchOrder=c(1,1)), mean.model = list(armaOrder=c(3,3)),distribution.model = "std")
+armagarch_model5 = ugarchfit(data=training_set_recent, spec=armagarch_model_spec5)
+(-2*likelihood(armagarch_model5))/length(training_set_recent)+2*(length(armagarch_model5@fit$coef))/length(training_set_recent) #### AIC 
+armagarch_predict5 = ugarchboot(armagarch_model5,n.ahead=52, method=c("Partial","Full")[1])
+plot(armagarch_predict5,which=2) 
+plot(ts(armagarch_predict5@forc@forecast$seriesFor, start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "GARCH 5: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+garch5_rmse = sqrt(mean((armagarch_predict5@forc@forecast$seriesFor - test_set)^2))
+garch5_rmse 
+### ARMA-GARCH Model 6: ARMA(1,2) Model with GARCH(1,1), not the best model
+armagarch_model_spec6 = ugarchspec(variance.model = list(model="sGARCH",garchOrder=c(1,1)), mean.model = list(armaOrder=c(1,2)),distribution.model = "std")
+armagarch_model6 = ugarchfit(data=training_set_recent, spec=armagarch_model_spec6)
+(-2*likelihood(armagarch_model6))/length(training_set_recent)+2*(length(armagarch_model6@fit$coef))/length(training_set_recent) #### AIC 
+armagarch_predict6 = ugarchboot(armagarch_model6,n.ahead=52, method=c("Partial","Full")[1])
+plot(armagarch_predict6,which=2) 
+plot(ts(armagarch_predict6@forc@forecast$seriesFor, start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "GARCH 6: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+garch6_rmse = sqrt(mean((armagarch_predict6@forc@forecast$seriesFor - test_set)^2))
+garch6_rmse
+### ARMA-GARCH Model 7: ARMA(2,1) Model with GARCH(1,1), not the best model
+armagarch_model_spec7 = ugarchspec(variance.model = list(model="sGARCH",garchOrder=c(1,1)), mean.model = list(armaOrder=c(2,1)),distribution.model = "std")
+armagarch_model7 = ugarchfit(data=training_set_recent, spec=armagarch_model_spec7)
+(-2*likelihood(armagarch_model7))/length(training_set_recent)+2*(length(armagarch_model7@fit$coef))/length(training_set_recent) #### AIC 
+armagarch_predict7 = ugarchboot(armagarch_model7,n.ahead=52, method=c("Partial","Full")[1])
+plot(armagarch_predict7,which=2) 
+plot(ts(armagarch_predict7@forc@forecast$seriesFor, start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(300000, 500000), ylab = "Weekly Total Claims", main = "GARCH 7: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+garch7_rmse = sqrt(mean((armagarch_predict7@forc@forecast$seriesFor - test_set)^2))
+garch7_rmse
+```
+
+# Section 7: Spectral Analysis 
+```{r}
+par(mfrow=c(1,1))
+## Step 1: Periodogram
+periodogram(training_set_recent) #### There are two very significant spikes
+abline(h=0, col = 'red')
+training_periodogram = periodogram(training_set_recent)
+which.max(training_periodogram$spec) #### The largest frequancy is 1
+largest = sort(training_periodogram$spec, decreasing = TRUE)[1]
+which.max(training_periodogram$spec[-1]) #### The second largest frequancy is 3+1 = 4
+second_largest = sort(training_periodogram$spec, decreasing = TRUE)[2]
+freq1 = training_periodogram$freq[1] #### 0.00462963, for cos1 and sin1
+freq1
+freq2 = training_periodogram$freq[4] #### 0.01851852, for cos2 and sin2
+freq2
+## Step 2: Fourier Transformation
+t = as.vector(time(training_set_recent))
+n = length(t) #### n = 208
+cos1 = cos(2*pi*t*freq1)
+sin1 = sin(2*pi*t*freq1)
+cos2 = cos(2*pi*t*freq2)
+sin2 = sin(2*pi*t*freq2)
+y = as.vector(training_set_recent)
+train_df = data.frame(t,y,cos1,sin1,cos2,sin2)
+## Step 3: Regression Models (Start here!!!)
+#### Setting up a dataframe for the test set
+test_t = as.vector(time(test_set))
+test_cos1 = cos(2*pi*test_t*freq1)
+test_sin1 = sin(2*pi*test_t*freq1)
+test_cos2 = cos(2*pi*test_t*freq2)
+test_sin2 = sin(2*pi*test_t*freq2)
+test_df =  data.frame(test_t,cos1=test_cos1,sin1=test_sin1,cos2=test_cos2,sin2=test_sin2)
+### Frequancy Model 1: One cos-sin pair with freq 1
+freq_model1 = lm(y ~ cos1 + sin1, data = train_df)
+summary(freq_model1)
+plot(training_set_recent)
+lines(ts(freq_model1$fitted.values,start = decimal_date(ymd("2012-9-30")), frequency = 365.25/7), col = 'red')
+forecast_freq_model1 = predict.lm(freq_model1, newdata = test_df[,c(2,3)], interval = "prediction")
+plot(ts(forecast_freq_model1[,1], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(200000, 500000), ylab = "Weekly Total Claims($)", main = "Freq 1: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+lines(ts(forecast_freq_model1[,2], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+lines(ts(forecast_freq_model1[,3], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+freq1_rmse = sqrt(mean((forecast_freq_model1[,1] - test_set)^2))
+freq1_rmse
+### Frequancy Model 2: Two cos-sin pairs with freq 1 and freq 2
+freq_model2 = lm(y ~ cos1 + sin1 + cos2 + sin2, data = train_df)
+summary(freq_model2) 
+forecast_freq_model2 = predict.lm(freq_model2, newdata = test_df[,c(2,3,4,5)], interval = "prediction")
+plot(ts(forecast_freq_model2[,1], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(-100000, 600000), ylab = "Weekly Total Claims($)", main = "Freq 2: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+lines(ts(forecast_freq_model2[,2], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+lines(ts(forecast_freq_model2[,3], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+freq2_rmse = sqrt(mean((forecast_freq_model2[,1] - test_set)^2))
+freq2_rmse
+### Frequancy Model 3: One cos-sin pair with freq 1 (Poly)
+freq_model3 = lm(y ~ poly(cos1 + sin1,2), data = train_df)
+plot(training_set_recent)
+lines(ts(freq_model3$fitted.values,start = decimal_date(ymd("2012-9-30")), frequency = 365.25/7), col = 'red')
+forecast_freq_model3 = predict.lm(freq_model3, newdata = test_df[,c(2,3)], interval = "prediction")
+plot(ts(forecast_freq_model3[,1], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(200000, 500000), ylab = "Weekly Total Claims($)", main = "Freq 4: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+lines(ts(forecast_freq_model3[,2], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+lines(ts(forecast_freq_model3[,3], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+freq3_rmse = sqrt(mean((forecast_freq_model3[,1] - test_set)^2))
+freq3_rmse
+### Frequancy Model 4: Two cos-sin pairs with freq 1 and freq 2 (Poly)
+freq_model4 = lm(y ~ poly(cos1 + sin1 + cos2 + sin2,2), data = train_df)
+plot(training_set_recent)
+lines(ts(freq_model4$fitted.values,start = decimal_date(ymd("2012-9-30")), frequency = 365.25/7), col = 'red')
+forecast_freq_model4 = predict.lm(freq_model4, newdata = test_df[,c(2,3,4,5)], interval = "prediction")
+plot(ts(forecast_freq_model4[,1], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7), col='red',ylim = c(200000, 500000), ylab = "Weekly Total Claims($)", main = "Freq 4: Predicted(Red) vs. Actual(Green) Weekly Total Claims")
+lines(test_set,type="l",col="green")
+lines(ts(forecast_freq_model4[,2], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+lines(ts(forecast_freq_model4[,3], start = decimal_date(ymd("2016-9-30")), frequency = 365.25/7),type="l", col='dark grey',lty=2)
+freq4_rmse = sqrt(mean((forecast_freq_model4[,1] - test_set)^2))
+freq4_rmse 
+```
+
+# Section 8: Using the Best Model to Forecast 2018 and Model Diagnostics
+```{r}
+## Step 1: Best Model: Seasonal ARIMA (1,1,2)(1,1,0)[52] 
+par(mfrow = c(1,1))
+best_model = Arima(window(ts_total, start = decimal_date(ymd("2012-09-29")), end = decimal_date(ymd("2017-09-30")), frequency = 365.25/7),order=c(1,1,2),seasonal=list(order=c(1,1,0),period=365.25/7))
+best_model #### AIC = 4914.9
+coeftest(best_model) #### One of the coefficients is significant
+forecast_best_model = forecast(best_model, h = 365.25/7)
+plot(forecast_best_model, main = "Forecasts for CA Weekly Total Unemployment Insurance Claims (09/30/2017 - 09/30/2018)", sub ='Forecast (ARIMA (1,1,2)(1,1,0)[52])', ylab = 'Weekly Total Claims (forecast)')
+## Step 2: Check Residual Normality
+periodogram(rstandard(best_model), main)
+par(mfrow = c(2,2))
+plot(rstandard(best_model),main ='Standardized Residual Plot', ylab='Standardized Residuals', type='l')
+abline(h=0, col = "red")
+acf(as.vector(rstandard(best_model)),lag.max = 365.25/7*4, main = "ACF of Standardized Residuals")
+hist(rstandard(best_model),xlab='standardized residuals', main = 'Histogram of Standardized Residuals')
+qqnorm(rstandard(best_model), main = 'Normal QQ Plot of Standardized Residuals')
+qqline(rstandard(best_model), col = "red")
+```
